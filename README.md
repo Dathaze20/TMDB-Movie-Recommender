@@ -42,25 +42,23 @@ This is a movie recommendation app built using Python and Kivy, leveraging the T
     git clone [repository URL]
     cd [project directory]
     ```
-2.  **Set Up Environment Variables:**
-    *   Create a `.env` file in the project's root directory.
+2.  **Install Dependencies:**
+    ```bash
+    pip install -r requirements.txt
+    ```
+3.  **Set Up Environment Variables:**
+    *   Copy `.env.example` to `.env` in the project's root directory.
+        ```bash
+        cp .env.example .env
+        ```
     *   Add your TMDB API key to the `.env` file:
         ```env
         TMDB_API_KEY=YOUR_TMDB_API_KEY
         ```
-       * Remember to install the **python-dotenv** module by using the following command:
-          ```bash
-           pip install python-dotenv
-          ```
-3.  **Install Dependencies:**
-    ```bash
-    pip install tmdbv3api kivy python-dotenv requests
-    ```
 4.  **Run the App:**
     ```bash
     python main.py
     ```
-   * Remember to rename the python file from the one provided above from main to the file you have.
 
 5. **Using the App:**
    *  Use the text input at the top of the page to search for a movie.
