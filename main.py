@@ -107,6 +107,11 @@ GENRES = {
 
 CATEGORIES = ['Popular', 'Top Rated', 'Now Playing', 'Watchlist']
 
+# Caps how many movies a single browsing/search session can load into the
+# grid (TMDB returns 20/page) - keeps widget/texture memory bounded on phones
+# during long scroll sessions instead of growing without limit.
+MAX_PAGES = 10
+
 
 def star_text(rating):
     filled = round((rating or 0) / 2)
@@ -321,17 +326,19 @@ class MovieCard(ButtonBehavior, BoxLayout):
 
         bottom_row = BoxLayout(size_hint_y=0.5)
 
-        score = f"{movie.vote_average:.1f}" if movie.vote_average else ''
+        score = f"{movie.vote_average:.1f}" if movie.vote_average else 'N/A'
         stars_lbl = Label(
-            text=f"{star_text(movie.vote_average)} {score}",
-            font_size='9sp', color=GOLD, font_name=SYMBOL_FONT,
-            halign='left', valign='middle', size_hint_x=0.72,
+            text=f"★ {score}",
+            font_size='10sp', color=GOLD, font_name=SYMBOL_FONT, bold=True,
+            halign='left', valign='middle', size_hint_x=0.55,
+            shorten=True, shorten_from='right',
         )
         stars_lbl.bind(size=lambda i, s: setattr(i, 'text_size', s))
 
         year_lbl = Label(
             text=movie.year, font_size='9sp', color=TEXT_MUTED,
-            halign='right', valign='middle', size_hint_x=0.28,
+            halign='right', valign='middle', size_hint_x=0.45,
+            shorten=True, shorten_from='right',
         )
         year_lbl.bind(size=lambda i, s: setattr(i, 'text_size', s))
 
@@ -421,8 +428,11 @@ class CategoryBar(BoxLayout):
             btn = Button(
                 text=name, background_normal='',
                 background_color=ACCENT if name == 'Popular' else TAB_INACTIVE,
-                color=TEXT_PRIMARY, font_size='11.5sp', bold=(name == 'Popular'),
+                color=TEXT_PRIMARY, font_size='10.5sp', bold=(name == 'Popular'),
+                size_hint_x=len(name), shorten=True, shorten_from='right',
+                halign='center', valign='middle',
             )
+            btn.bind(size=lambda i, s: setattr(i, 'text_size', (s[0] - dp(6), s[1])))
             btn.bind(on_release=lambda inst, n=name: self._pick(n))
             self._btns[name] = btn
             self.add_widget(btn)
@@ -486,6 +496,7 @@ class MoviePosterApp(App):
         self.title_label = Label(
             text='Popular Movies', font_size='20sp', bold=True,
             color=TEXT_PRIMARY, halign='left',
+            shorten=True, shorten_from='right',
         )
         self.title_label.bind(size=lambda i, s: setattr(i, 'text_size', s))
         about_btn = Button(
@@ -528,6 +539,12 @@ class MoviePosterApp(App):
         self.grid.bind(minimum_height=self.grid.setter('height'))
         self.scroll.add_widget(self.grid)
         root.add_widget(self.scroll)
+
+        self.loading_more_label = Label(
+            text='', color=TEXT_MUTED, size_hint_y=None,
+            height=0, font_size='12sp',
+        )
+        root.add_widget(self.loading_more_label)
 
         self.main_scr.add_widget(root)
         sm.add_widget(self.main_scr)
@@ -581,6 +598,7 @@ class MoviePosterApp(App):
         self._current_page = 1
         self._has_more = True
         self._loading_more = False
+        self._hide_loading_more()
 
     def _show_watchlist(self):
         self._has_more = False
@@ -698,13 +716,14 @@ class MoviePosterApp(App):
         if self._loading_more or not self._has_more or self.current_cat == 'Watchlist':
             return
         self._loading_more = True
+        self._show_loading_more()
         gen = self.load_generation
         threading.Thread(target=self._fetch_more, args=(gen,), daemon=True).start()
 
     def _fetch_more(self, gen):
         try:
             next_page = self._current_page + 1
-            if next_page > 20:
+            if next_page > MAX_PAGES:
                 self._has_more = False
                 return
             if self._search_query:
@@ -725,6 +744,7 @@ class MoviePosterApp(App):
             logging.error(f"Load more error: {e}")
         finally:
             self._loading_more = False
+            self._hide_loading_more()
 
     # -- widget helpers -------------------------------------------------------
 
@@ -746,12 +766,23 @@ class MoviePosterApp(App):
         if self.error_label:
             self.error_label.text = ''
             self.error_label.height = 0
-            self.error_label.height = dp(0)
 
     @mainthread
     def _clear_grid(self):
         if self.grid:
             self.grid.clear_widgets()
+
+    @mainthread
+    def _show_loading_more(self):
+        if self.loading_more_label:
+            self.loading_more_label.text = 'Loading more...'
+            self.loading_more_label.height = dp(24)
+
+    @mainthread
+    def _hide_loading_more(self):
+        if self.loading_more_label:
+            self.loading_more_label.text = ''
+            self.loading_more_label.height = 0
 
     @mainthread
     def _show_loading(self):
@@ -962,6 +993,7 @@ class MoviePosterApp(App):
                 cast_box.add_widget(Label(
                     text=name, font_size='12sp', color=TEXT_MUTED,
                     size_hint_x=None, width=dp(130),
+                    text_size=(dp(130), None), shorten=True, shorten_from='right',
                 ))
             cast_scroll.add_widget(cast_box)
             body.add_widget(cast_scroll)
@@ -987,11 +1019,15 @@ class MoviePosterApp(App):
         body.add_widget(Widget(size_hint_y=None, height=dp(20)))
 
     def _label(self, text, size, color, bold=False, height=None, font_name=None):
+        # This helper is only ever used for single-line rows (title, rating,
+        # meta, section headers) - shorten instead of wrap so a long value
+        # never overflows its fixed height.
         lbl = Label(
             text=text, font_size=size, color=color, bold=bold,
             size_hint_y=None, height=height if height is not None else dp(30),
             halign='left', text_size=(Window.width - dp(34), None),
             font_name=font_name or 'Roboto',
+            shorten=True, shorten_from='right',
         )
         return lbl
 
