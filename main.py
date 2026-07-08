@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import time
 import socket
 import hashlib
 import logging
@@ -14,6 +15,7 @@ from dotenv import load_dotenv
 from kivy.config import Config
 Config.set('kivy', 'keyboard_mode', 'system')
 
+from kivy.animation import Animation
 from kivy.app import App
 from kivy.clock import Clock, mainthread
 from kivy.core.window import Window
@@ -82,6 +84,11 @@ if not os.getenv('TMDB_API_KEY'):
 tmdb = TMDb()
 tmdb.api_key = api_key or ''
 tmdb.wait_on_rate_limit = True
+# tmdbv3api caches identical GET requests indefinitely (unbounded lru_cache)
+# on its own, independent of our _category_cache TTL/refresh logic below -
+# disable it so our cache is the single source of truth and the refresh
+# button actually reaches TMDB's servers instead of replaying old data.
+tmdb.cache = False
 
 TMDB_ATTRIBUTION = "This product uses the TMDB API but is not endorsed or certified by TMDB."
 
@@ -111,6 +118,14 @@ CATEGORIES = ['Popular', 'Top Rated', 'Now Playing', 'Watchlist']
 # grid (TMDB returns 20/page) - keeps widget/texture memory bounded on phones
 # during long scroll sessions instead of growing without limit.
 MAX_PAGES = 10
+
+# How long a browsed category's results stay cached in memory before a tab
+# switch triggers a fresh network fetch instead of showing the cached list.
+CACHE_TTL = 300
+
+# Seconds of typing pause before search-as-you-type fires, so we don't issue
+# a network request on every single keystroke.
+SEARCH_DEBOUNCE = 0.5
 
 
 def star_text(rating):
@@ -356,6 +371,59 @@ class MovieCard(ButtonBehavior, BoxLayout):
         self.height = h + dp(50)
 
 
+class SkeletonCard(BoxLayout):
+    """Placeholder shown in the grid while a category/search's first page
+    is loading, instead of blocking the whole screen with a popup."""
+
+    def __init__(self, **kwargs):
+        super().__init__(orientation='vertical', spacing=dp(6), padding=0, **kwargs)
+        self.size_hint_y = None
+
+        with self.canvas.before:
+            Color(*CARD_COLOR)
+            self._bg = RoundedRectangle(pos=self.pos, size=self.size, radius=[dp(10)])
+        self.bind(
+            pos=lambda i, v: setattr(i._bg, 'pos', v),
+            size=lambda i, v: setattr(i._bg, 'size', v),
+        )
+
+        self._poster_ph = Widget(size_hint=(1, None))
+        with self._poster_ph.canvas:
+            Color(*SURFACE_COLOR)
+            self._poster_rect = RoundedRectangle(radius=[dp(8)])
+        self._poster_ph.bind(
+            pos=lambda i, v: setattr(self._poster_rect, 'pos', v),
+            size=lambda i, v: setattr(self._poster_rect, 'size', v),
+        )
+        self.add_widget(self._poster_ph)
+
+        info = BoxLayout(
+            orientation='vertical', size_hint_y=None, height=dp(50),
+            padding=[dp(5), dp(8)], spacing=dp(6),
+        )
+        for line_height, width_frac in ((dp(10), 0.7), (dp(8), 0.4)):
+            line = Widget(size_hint=(width_frac, None), height=line_height)
+            with line.canvas:
+                Color(*SURFACE_COLOR)
+                rect = RoundedRectangle(radius=[dp(4)])
+            line.bind(
+                pos=lambda i, v, r=rect: setattr(r, 'pos', v),
+                size=lambda i, v, r=rect: setattr(r, 'size', v),
+            )
+            info.add_widget(line)
+        self.add_widget(info)
+
+        self.bind(size=self._resize)
+        anim = Animation(opacity=0.45, duration=0.6) + Animation(opacity=1.0, duration=0.6)
+        anim.repeat = True
+        anim.start(self)
+
+    def _resize(self, *args):
+        h = self.width * 1.5
+        self._poster_ph.height = h
+        self.height = h + dp(50)
+
+
 class SearchBar(BoxLayout):
     search_text = StringProperty('')
 
@@ -365,6 +433,7 @@ class SearchBar(BoxLayout):
             spacing=dp(6), padding=[dp(4), 0], **kwargs,
         )
         self.register_event_type('on_search')
+        self._debounce_ev = None
 
         with self.canvas.before:
             Color(*SEARCH_BG)
@@ -400,13 +469,20 @@ class SearchBar(BoxLayout):
 
     def _text_changed(self, inst, val):
         self.search_text = val
+        if self._debounce_ev:
+            self._debounce_ev.cancel()
+        self._debounce_ev = Clock.schedule_once(lambda dt: self.dispatch('on_search'), SEARCH_DEBOUNCE)
 
     def _clear(self, *a):
+        if self._debounce_ev:
+            self._debounce_ev.cancel()
         self.input.text = ''
         self.search_text = ''
         self.dispatch('on_search')
 
     def _submit(self, *a):
+        if self._debounce_ev:
+            self._debounce_ev.cancel()
         self.dispatch('on_search')
 
     def on_search(self):
@@ -456,7 +532,6 @@ class MoviePosterApp(App):
         self.movie_cache: Dict[int, MovieDetails] = {}
         self.favorites: Dict[int, MovieDetails] = {}
         self.fav_file = None
-        self.loading_popup = None
         self.error_label = None
         self.grid = None
         self.search_bar = None
@@ -468,6 +543,8 @@ class MoviePosterApp(App):
         self._current_page = 1
         self._has_more = True
         self._loading_more = False
+        self._current_movies = []
+        self._category_cache = {}
         self._detail_token = 0
         self._detail_body = None
 
@@ -499,6 +576,12 @@ class MoviePosterApp(App):
             shorten=True, shorten_from='right',
         )
         self.title_label.bind(size=lambda i, s: setattr(i, 'text_size', s))
+        refresh_btn = Button(
+            text='↻', size_hint=(None, None), size=(dp(34), dp(34)),
+            background_normal='', background_color=TAB_INACTIVE,
+            color=TEXT_PRIMARY, font_size='18sp', font_name=SYMBOL_FONT,
+        )
+        refresh_btn.bind(on_release=self._on_refresh)
         about_btn = Button(
             text='i', size_hint=(None, None), size=(dp(34), dp(34)),
             background_normal='', background_color=TAB_INACTIVE,
@@ -506,6 +589,7 @@ class MoviePosterApp(App):
         )
         about_btn.bind(on_release=self._show_about)
         title_bar.add_widget(self.title_label)
+        title_bar.add_widget(refresh_btn)
         title_bar.add_widget(about_btn)
         root.add_widget(title_bar)
 
@@ -555,7 +639,7 @@ class MoviePosterApp(App):
             self._show_error(f"TMDB_API_KEY missing. Checked for a .env file at: {checked}")
             return sm
 
-        self._show_loading()
+        self._show_skeletons()
         gen = self.load_generation
         threading.Thread(target=self._load_cat, args=('Popular', gen), daemon=True).start()
         return sm
@@ -598,6 +682,7 @@ class MoviePosterApp(App):
         self._current_page = 1
         self._has_more = True
         self._loading_more = False
+        self._current_movies = []
         self._hide_loading_more()
 
     def _show_watchlist(self):
@@ -609,7 +694,37 @@ class MoviePosterApp(App):
             self.movie_cache[mv.id] = mv
             self._add_card(mv)
 
+    def _snapshot_scroll_position(self):
+        prev = self.current_cat
+        if prev and prev != 'Watchlist' and prev in self._category_cache and self.scroll:
+            self._category_cache[prev]['scroll_y'] = self.scroll.scroll_y
+
+    def _save_category_cache(self, cat):
+        self._category_cache[cat] = {
+            'movies': list(self._current_movies),
+            'page': self._current_page,
+            'has_more': self._has_more,
+            'ts': time.time(),
+            'scroll_y': self._category_cache.get(cat, {}).get('scroll_y', 1),
+        }
+
+    def _load_from_cache(self, cat):
+        cached = self._category_cache.get(cat)
+        if not cached or (time.time() - cached['ts']) >= CACHE_TTL:
+            return False
+        self._current_movies = list(cached['movies'])
+        self._current_page = cached['page']
+        self._has_more = cached['has_more']
+        self._loading_more = False
+        for mv in self._current_movies:
+            self.movie_cache[mv.id] = mv
+            self._add_card(mv)
+        scroll_y = cached.get('scroll_y', 1)
+        Clock.schedule_once(lambda dt: setattr(self.scroll, 'scroll_y', scroll_y), 0.05)
+        return True
+
     def _on_category(self, inst, cat):
+        self._snapshot_scroll_position()
         self.load_generation += 1
         gen = self.load_generation
         self.current_cat = cat
@@ -619,17 +734,29 @@ class MoviePosterApp(App):
         self.title_label.text = 'My Watchlist' if cat == 'Watchlist' else f'{cat} Movies'
         self._clear_error()
         self._clear_grid()
-        self._reset_pagination()
 
         if cat == 'Watchlist':
+            self._reset_pagination()
             self._show_watchlist()
             return
 
-        self._show_loading()
+        if self._load_from_cache(cat):
+            return
+
+        self._reset_pagination()
+        self._show_skeletons()
         threading.Thread(target=self._load_cat, args=(cat, gen), daemon=True).start()
+
+    def _on_refresh(self, *a):
+        if self._search_query:
+            self._on_search()
+            return
+        self._category_cache.pop(self.current_cat, None)
+        self._on_category(None, self.current_cat)
 
     def _on_search(self, *a):
         q = self.search_bar.search_text.strip()
+        self._snapshot_scroll_position()
         self.load_generation += 1
         gen = self.load_generation
         self._clear_error()
@@ -644,13 +771,15 @@ class MoviePosterApp(App):
             if cat == 'Watchlist':
                 self._show_watchlist()
                 return
-            self._show_loading()
+            if self._load_from_cache(cat):
+                return
+            self._show_skeletons()
             threading.Thread(target=self._load_cat, args=(cat, gen), daemon=True).start()
             return
 
         self._search_query = q
         self.title_label.text = f'Search: {q}'
-        self._show_loading()
+        self._show_skeletons()
         threading.Thread(target=self._do_search, args=(q, gen), daemon=True).start()
 
     def _cat_func(self, cat):
@@ -667,21 +796,23 @@ class MoviePosterApp(App):
             first = fetch_movies(func, page_number=1)
             if gen != self.load_generation:
                 return
+            self._clear_grid()
             if not first:
                 self._show_error("Could not load movies. Check your connection.")
-                self._hide_loading()
                 self._has_more = False
                 return
+            self._current_movies = []
             for mv in first:
                 self.movie_cache[mv.id] = mv
+                self._current_movies.append(mv)
                 self._add_card(mv)
-            self._hide_loading()
             self._current_page = 1
             self._has_more = True
+            self._save_category_cache(cat)
         except Exception as e:
             logging.error(f"Load error: {e}")
+            self._clear_grid()
             self._show_error("Could not load movies. Check your connection.")
-            self._hide_loading()
             self._has_more = False
 
     def _do_search(self, query, gen):
@@ -689,21 +820,20 @@ class MoviePosterApp(App):
             first = fetch_movies(Movie().search, query, 1)
             if gen != self.load_generation:
                 return
+            self._clear_grid()
             if not first:
                 self._show_error("No movies found.")
-                self._hide_loading()
                 self._has_more = False
                 return
             for mv in first:
                 self.movie_cache[mv.id] = mv
                 self._add_card(mv)
-            self._hide_loading()
             self._current_page = 1
             self._has_more = True
         except Exception as e:
             logging.error(f"Search error: {e}")
+            self._clear_grid()
             self._show_error("Search failed. Check your connection.")
-            self._hide_loading()
             self._has_more = False
 
     # -- infinite scroll ----------------------------------------------------
@@ -739,7 +869,10 @@ class MoviePosterApp(App):
             self._current_page = next_page
             for mv in more:
                 self.movie_cache[mv.id] = mv
+                self._current_movies.append(mv)
                 self._add_card(mv)
+            if not self._search_query:
+                self._save_category_cache(self.current_cat)
         except Exception as e:
             logging.error(f"Load more error: {e}")
         finally:
@@ -785,20 +918,10 @@ class MoviePosterApp(App):
             self.loading_more_label.height = 0
 
     @mainthread
-    def _show_loading(self):
-        self.loading_popup = Popup(
-            title='', separator_height=0,
-            content=Label(text='Loading...', color=TEXT_PRIMARY, font_size='15sp'),
-            size_hint=(None, None), size=(dp(150), dp(90)),
-            auto_dismiss=False,
-            background_color=(*CARD_COLOR[:3], 0.95),
-        )
-        self.loading_popup.open()
-
-    @mainthread
-    def _hide_loading(self):
-        if self.loading_popup:
-            self.loading_popup.dismiss()
+    def _show_skeletons(self, count=9):
+        if self.grid:
+            for _ in range(count):
+                self.grid.add_widget(SkeletonCard())
 
     def _show_about(self, *a):
         content = BoxLayout(orientation='vertical', padding=dp(16), spacing=dp(12))
@@ -903,11 +1026,19 @@ class MoviePosterApp(App):
         body.bind(minimum_height=body.setter('height'))
 
         if movie.poster_path:
-            body.add_widget(AsyncImage(
+            poster_wrap = BoxLayout(size_hint=(1, None), height=dp(380))
+            with poster_wrap.canvas.before:
+                Color(*SURFACE_COLOR)
+                poster_bg = RoundedRectangle(radius=[dp(10)])
+            poster_wrap.bind(
+                pos=lambda i, v, r=poster_bg: setattr(r, 'pos', v),
+                size=lambda i, v, r=poster_bg: setattr(r, 'size', v),
+            )
+            poster_wrap.add_widget(AsyncImage(
                 source=PosterCache.source(movie.poster_path, 'w500'),
-                size_hint=(1, None), height=dp(380),
                 allow_stretch=True, keep_ratio=True,
             ))
+            body.add_widget(poster_wrap)
 
         body.add_widget(self._label(
             movie.title, '22sp', TEXT_PRIMARY, bold=True, height=dp(36),

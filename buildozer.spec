@@ -28,11 +28,11 @@ android.minapi = 24
 android.api = 34
 android.ndk_api = 24
 
-# Uncomment and point these at real 512x512 / 720x1280 images before
-# building a release you intend to keep - Buildozer falls back to the
-# default Kivy icon/splash otherwise, which is fine for local testing.
-# icon.filename = %(source.dir)s/assets/icon.png
-# presplash.filename = %(source.dir)s/assets/presplash.png
+# Placeholder branded icon/splash (dark background, gold star, purple ring
+# matching the in-app theme) - swap these files for real artwork before
+# building a release you intend to keep.
+icon.filename = %(source.dir)s/assets/icon.png
+presplash.filename = %(source.dir)s/assets/presplash.png
 
 android.archs = arm64-v8a, armeabi-v7a
 
