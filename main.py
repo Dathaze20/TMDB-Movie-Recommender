@@ -68,10 +68,16 @@ load_dotenv(_env_path) if _env_path else load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s:%(levelname)s:%(message)s')
 
-api_key = os.getenv('TMDB_API_KEY')
-if not api_key:
+# Original fallback key this project shipped with from its very first commit -
+# used only if no TMDB_API_KEY is found via .env/environment, so the app
+# works out of the box regardless of where .env ends up on a given device.
+# A .env with your own key always takes priority over this.
+_DEFAULT_API_KEY = '412cb4afbe96d39f9db34601104ff7e4'
+
+api_key = os.getenv('TMDB_API_KEY') or _DEFAULT_API_KEY
+if not os.getenv('TMDB_API_KEY'):
     _checked = ', '.join(_env_candidates)
-    logging.error(f"TMDB_API_KEY not found. Checked for .env at: {_checked}")
+    logging.warning(f"TMDB_API_KEY not found (checked for .env at: {_checked}); using built-in default key.")
 
 tmdb = TMDb()
 tmdb.api_key = api_key or ''
