@@ -45,15 +45,33 @@ SYMBOL_FONT = os.path.join(kivy_data_dir, 'fonts', 'DejaVuSans.ttf')
 # (and the loading popup) forever.
 socket.setdefaulttimeout(15)
 
+def _find_env_file():
+    """Look for .env next to the script, in the current working directory,
+    and one level up - covers the common ways an Android runner (Pydroid,
+    Termux) can end up launching main.py from an unexpected working
+    directory or a nested folder from a zip download."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates = []
+    for d in (script_dir, os.getcwd(), os.path.dirname(script_dir)):
+        path = os.path.join(d, '.env')
+        if path not in candidates:
+            candidates.append(path)
+    for path in candidates:
+        if os.path.exists(path):
+            return path, candidates
+    return None, candidates
+
+
 _script_dir = os.path.dirname(os.path.abspath(__file__))
-_env_path = os.path.join(_script_dir, '.env')
-load_dotenv(_env_path)
+_env_path, _env_candidates = _find_env_file()
+load_dotenv(_env_path) if _env_path else load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s:%(levelname)s:%(message)s')
 
 api_key = os.getenv('TMDB_API_KEY')
 if not api_key:
-    logging.error(f"TMDB_API_KEY not found. Looked for .env at: {_env_path}")
+    _checked = ', '.join(_env_candidates)
+    logging.error(f"TMDB_API_KEY not found. Checked for .env at: {_checked}")
 
 tmdb = TMDb()
 tmdb.api_key = api_key or ''
@@ -510,7 +528,8 @@ class MoviePosterApp(App):
         sm.add_widget(self.detail_scr)
 
         if not api_key:
-            self._show_error(f"TMDB_API_KEY missing. Expected a .env file at: {_env_path}")
+            checked = ' OR '.join(_env_candidates)
+            self._show_error(f"TMDB_API_KEY missing. Checked for a .env file at: {checked}")
             return sm
 
         self._show_loading()
