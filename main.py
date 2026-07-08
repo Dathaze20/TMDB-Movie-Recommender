@@ -32,21 +32,28 @@ from kivy.uix.scrollview import ScrollView
 from kivy.uix.textinput import TextInput
 from kivy.uix.widget import Widget
 from kivy.utils import platform
+from kivy import kivy_data_dir
 from tmdbv3api import TMDb, Movie
 from tmdbv3api.exceptions import TMDbException
+
+# Kivy's default font (Roboto) has no glyphs for ★ ☆ ✕ ← ▶, so those render
+# as blank boxes - DejaVuSans (also bundled with Kivy, on every platform
+# including Android) does have them.
+SYMBOL_FONT = os.path.join(kivy_data_dir, 'fonts', 'DejaVuSans.ttf')
 
 # Prevent a flaky/hung mobile connection from blocking a background thread
 # (and the loading popup) forever.
 socket.setdefaulttimeout(15)
 
 _script_dir = os.path.dirname(os.path.abspath(__file__))
-load_dotenv(os.path.join(_script_dir, '.env'))
+_env_path = os.path.join(_script_dir, '.env')
+load_dotenv(_env_path)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s:%(levelname)s:%(message)s')
 
 api_key = os.getenv('TMDB_API_KEY')
 if not api_key:
-    logging.error("TMDB_API_KEY not found in .env file")
+    logging.error(f"TMDB_API_KEY not found. Looked for .env at: {_env_path}")
 
 tmdb = TMDb()
 tmdb.api_key = api_key or ''
@@ -293,7 +300,7 @@ class MovieCard(ButtonBehavior, BoxLayout):
         score = f"{movie.vote_average:.1f}" if movie.vote_average else ''
         stars_lbl = Label(
             text=f"{star_text(movie.vote_average)} {score}",
-            font_size='9sp', color=GOLD,
+            font_size='9sp', color=GOLD, font_name=SYMBOL_FONT,
             halign='left', valign='middle', size_hint_x=0.72,
         )
         stars_lbl.bind(size=lambda i, s: setattr(i, 'text_size', s))
@@ -347,7 +354,7 @@ class SearchBar(BoxLayout):
             font_size='15sp',
         )
         clear = Button(
-            text='✕', size_hint_x=0.18,
+            text='✕', size_hint_x=0.18, font_name=SYMBOL_FONT,
             background_normal='',
             background_color=(*ACCENT[:3], 0.85),
             color=TEXT_PRIMARY, font_size='18sp',
@@ -458,9 +465,9 @@ class MoviePosterApp(App):
         )
         self.title_label.bind(size=lambda i, s: setattr(i, 'text_size', s))
         about_btn = Button(
-            text='ⓘ', size_hint=(None, None), size=(dp(34), dp(34)),
+            text='i', size_hint=(None, None), size=(dp(34), dp(34)),
             background_normal='', background_color=TAB_INACTIVE,
-            color=TEXT_PRIMARY, font_size='16sp',
+            color=TEXT_PRIMARY, font_size='16sp', bold=True, italic=True,
         )
         about_btn.bind(on_release=self._show_about)
         title_bar.add_widget(self.title_label)
@@ -477,7 +484,12 @@ class MoviePosterApp(App):
 
         self.error_label = Label(
             text='', color=ERROR_COLOR, size_hint_y=None,
-            height=dp(0), font_size='13sp',
+            height=dp(0), font_size='13sp', font_name=SYMBOL_FONT,
+            halign='center', valign='middle',
+        )
+        self.error_label.bind(
+            width=lambda i, w: setattr(i, 'text_size', (w - dp(12), None)),
+            texture_size=lambda i, s: setattr(i, 'height', s[1] + dp(10) if i.text else 0),
         )
         root.add_widget(self.error_label)
 
@@ -498,7 +510,7 @@ class MoviePosterApp(App):
         sm.add_widget(self.detail_scr)
 
         if not api_key:
-            self._show_error("TMDB_API_KEY missing. Add it to .env in the project folder.")
+            self._show_error(f"TMDB_API_KEY missing. Expected a .env file at: {_env_path}")
             return sm
 
         self._show_loading()
@@ -703,12 +715,12 @@ class MoviePosterApp(App):
     def _show_error(self, msg):
         if self.error_label:
             self.error_label.text = msg
-            self.error_label.height = dp(26)
 
     @mainthread
     def _clear_error(self):
         if self.error_label:
             self.error_label.text = ''
+            self.error_label.height = 0
             self.error_label.height = dp(0)
 
     @mainthread
@@ -796,7 +808,7 @@ class MoviePosterApp(App):
         )
 
         back = Button(
-            text='← Back', size_hint_x=0.22,
+            text='← Back', size_hint_x=0.22, font_name=SYMBOL_FONT,
             background_normal='', background_color=ACCENT,
             color=TEXT_PRIMARY, font_size='13sp', bold=True,
         )
@@ -811,6 +823,7 @@ class MoviePosterApp(App):
 
         fav_btn = Button(
             text=('★' if self.is_favorite(movie.id) else '☆'), size_hint_x=0.16,
+            font_name=SYMBOL_FONT,
             background_normal='', background_color=ACCENT,
             color=GOLD, font_size='18sp', bold=True,
         )
@@ -846,7 +859,7 @@ class MoviePosterApp(App):
 
         stars = star_text(movie.vote_average)
         score = f"{movie.vote_average:.1f}/10" if movie.vote_average else 'N/A'
-        body.add_widget(self._label(f"{stars}  {score}", '16sp', GOLD, height=dp(28)))
+        body.add_widget(self._label(f"{stars}  {score}", '16sp', GOLD, height=dp(28), font_name=SYMBOL_FONT))
 
         meta = []
         if movie.year:
@@ -903,6 +916,7 @@ class MoviePosterApp(App):
         if trailer_key:
             trailer_btn = Button(
                 text='▶  Watch Trailer', size_hint_y=None, height=dp(42),
+                font_name=SYMBOL_FONT,
                 background_normal='', background_color=ERROR_COLOR,
                 color=TEXT_PRIMARY, font_size='14sp', bold=True,
             )
@@ -947,11 +961,12 @@ class MoviePosterApp(App):
 
         body.add_widget(Widget(size_hint_y=None, height=dp(20)))
 
-    def _label(self, text, size, color, bold=False, height=None):
+    def _label(self, text, size, color, bold=False, height=None, font_name=None):
         lbl = Label(
             text=text, font_size=size, color=color, bold=bold,
             size_hint_y=None, height=height if height is not None else dp(30),
             halign='left', text_size=(Window.width - dp(34), None),
+            font_name=font_name or 'Roboto',
         )
         return lbl
 
