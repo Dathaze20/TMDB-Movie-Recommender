@@ -75,6 +75,20 @@ This repo includes a `buildozer.spec` so you can build an installable APK and si
 
 Before ever publishing to Google Play, bump `android.api` in `buildozer.spec` to whatever target level Play currently requires, add real `icon.png`/`presplash.png` assets, and write a privacy policy (the app sends network requests to TMDB but stores no personal data locally beyond your own watchlist).
 
+## Tests
+
+The pure data/formatting logic (star ratings, genre lookup, year parsing,
+watchlist JSON serialization) lives in `movie_utils.py`, which has no Kivy
+import, so it's unit tested directly with pytest — no display or GL context
+needed:
+
+```bash
+pip install -r requirements-dev.txt
+pytest -v
+```
+
+CI (`.github/workflows/test.yml`) runs this on every push and pull request.
+
 ## Technologies Used
 
 *   **Python:** Programming language.
