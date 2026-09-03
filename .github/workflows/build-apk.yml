@@ -1,0 +1,89 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # buildozer.spec builds arm64-v8a and armeabi-v7a, and the first run also
+    # downloads the Android SDK/NDK, so allow plenty of headroom.
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential git zip unzip autoconf automake libtool \
+            pkg-config zlib1g-dev libncurses-dev cmake libffi-dev \
+            libssl-dev ccache
+
+      # cython<3.2 is the ceiling python-for-android's pyjnius recipe
+      # declares; its kivy and android recipes only require >=0.29.1.
+      - name: Install buildozer
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          pip install buildozer==1.6.0 "cython<3.2"
+
+      # The SDK/NDK download is multi-GB and dominates build time, so cache it.
+      - name: Cache Android SDK/NDK
+        uses: actions/cache@v4
+        with:
+          path: ~/.buildozer
+          key: buildozer-global-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
+          restore-keys: buildozer-global-${{ runner.os }}-
+
+      - name: Cache compiled recipes
+        uses: actions/cache@v4
+        with:
+          path: .buildozer
+          key: buildozer-local-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
+          restore-keys: buildozer-local-${{ runner.os }}-
+
+      # buildozer.spec bundles .env via source.include_patterns, so setting a
+      # TMDB_API_KEY repository secret overrides the key built into main.py.
+      # Without the secret the app falls back to its built-in key as usual.
+      - name: Write .env from secret
+        env:
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+        run: |
+          if [ -n "$TMDB_API_KEY" ]; then
+            printf 'TMDB_API_KEY=%s\n' "$TMDB_API_KEY" > .env
+            echo "TMDB_API_KEY secret found - bundling it into the APK."
+          else
+            echo "No TMDB_API_KEY secret - the app will use its built-in key."
+          fi
+
+      - name: Build debug APK
+        run: buildozer -v android debug
+
+      - name: Show artifacts
+        run: ls -lh bin/
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: tmdb-movie-recommender-apk
+          path: bin/*.apk
+          if-no-files-found: error
+          retention-days: 30
