@@ -30,13 +30,24 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      # libltdl-dev is not optional: python-for-android's libffi recipe runs
+      # autoreconf on libffi 3.4.2, whose configure.ac calls
+      # LT_SYS_SYMBOL_USCORE. That macro lives in /usr/share/aclocal/ltdl.m4,
+      # which only libltdl-dev installs - without it autoreconf fails with
+      # "possibly undefined macro" and the whole build dies. The recipe's own
+      # docstring calls this out.
       - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential git zip unzip autoconf automake libtool \
-            pkg-config zlib1g-dev libncurses-dev cmake libffi-dev \
-            libssl-dev ccache
+            libltdl-dev pkg-config zlib1g-dev libncurses-dev cmake \
+            libffi-dev libssl-dev ccache
+
+      - name: Verify libffi's autoreconf macro is available
+        run: |
+          grep -rl 'AC_DEFUN(\[LT_SYS_SYMBOL_USCORE\]' /usr/share/aclocal/ \
+            || { echo "::error::LT_SYS_SYMBOL_USCORE missing; the libffi recipe will fail"; exit 1; }
 
       # cython<3.2 is the ceiling python-for-android's pyjnius recipe
       # declares; its kivy and android recipes only require >=0.29.1.
@@ -50,15 +61,15 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.buildozer
-          key: buildozer-global-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
-          restore-keys: buildozer-global-${{ runner.os }}-
+          key: buildozer-global-v2-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
+          restore-keys: buildozer-global-v2-${{ runner.os }}-
 
       - name: Cache compiled recipes
         uses: actions/cache@v4
         with:
           path: .buildozer
-          key: buildozer-local-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
-          restore-keys: buildozer-local-${{ runner.os }}-
+          key: buildozer-local-v2-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
+          restore-keys: buildozer-local-v2-${{ runner.os }}-
 
       # buildozer.spec bundles .env via source.include_patterns, so setting a
       # TMDB_API_KEY repository secret overrides the key built into main.py.
