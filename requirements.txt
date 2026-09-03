@@ -2,3 +2,5 @@ kivy==2.3.1
 tmdbv3api==1.9.0
 python-dotenv==1.2.2
 pillow==12.3.0
+# Supplies the CA bundle ssl uses on Android, where there is no system store.
+certifi

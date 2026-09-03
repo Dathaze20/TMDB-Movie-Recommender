@@ -1,5 +1,4 @@
 import os
-import sys
 import json
 import time
 import socket
@@ -9,7 +8,7 @@ import threading
 import urllib.request
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor
-from typing import List, Optional, Dict
+from typing import Dict
 from dotenv import load_dotenv
 
 from kivy.config import Config
@@ -21,7 +20,7 @@ from kivy.clock import Clock, mainthread
 from kivy.core.window import Window
 from kivy.graphics import Color, Rectangle, RoundedRectangle
 from kivy.metrics import dp
-from kivy.properties import StringProperty, NumericProperty
+from kivy.properties import StringProperty
 from kivy.uix.behaviors import ButtonBehavior
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.button import Button
@@ -36,7 +35,6 @@ from kivy.uix.widget import Widget
 from kivy.utils import platform
 from kivy import kivy_data_dir
 from tmdbv3api import TMDb, Movie
-from tmdbv3api.exceptions import TMDbException
 
 from movie_utils import star_text, MovieDetails
 
@@ -48,6 +46,17 @@ SYMBOL_FONT = os.path.join(kivy_data_dir, 'fonts', 'DejaVuSans.ttf')
 # Prevent a flaky/hung mobile connection from blocking a background thread
 # (and the loading popup) forever.
 socket.setdefaulttimeout(15)
+
+# Android ships no system CA bundle that Python's ssl module can find, so
+# every HTTPS call - the TMDB API and the poster CDN alike - fails on a
+# packaged APK unless ssl is pointed at the certifi bundle bundled with it.
+# setdefault means a real system bundle (desktop, Pydroid) still wins.
+try:
+    import certifi
+    os.environ.setdefault('SSL_CERT_FILE', certifi.where())
+    os.environ.setdefault('REQUESTS_CA_BUNDLE', certifi.where())
+except Exception as e:
+    logging.debug(f"certifi unavailable, relying on system CA store: {e}")
 
 def _find_env_file():
     """Look for .env next to the script, in the current working directory,
@@ -500,6 +509,9 @@ class MoviePosterApp(App):
     def build(self):
         Window.clearcolor = BG_COLOR
         Window.bind(on_keyboard=self._on_key)
+        # Without this the Android soft keyboard covers the search field
+        # instead of pushing it up into view.
+        Window.softinput_mode = 'below_target'
         self._load_favorites()
 
         sm = ScreenManager(transition=SlideTransition())
@@ -1114,6 +1126,14 @@ class MoviePosterApp(App):
     def _go_back(self, *a):
         self.sm.transition.direction = 'right'
         self.sm.current = 'Main'
+
+    def on_pause(self):
+        # Returning True lets Android background the app and resume it with
+        # state intact. The default (False) tears the app down instead.
+        return True
+
+    def on_resume(self):
+        pass
 
 
 if __name__ == '__main__':

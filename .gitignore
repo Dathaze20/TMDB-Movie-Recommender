@@ -3,3 +3,10 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# Buildozer / Android build output
+.buildozer/
+bin/
+*.apk
+*.aab
+*.keystore

@@ -63,15 +63,49 @@ This is a movie recommendation app built using Python and Kivy, leveraging the T
 
 ## Building an Android APK
 
-This repo includes a `buildozer.spec` so you can build an installable APK and side-load it onto your own phone.
+### The easy way: GitHub Actions
 
-1.  On Linux (or WSL), install [Buildozer](https://buildozer.readthedocs.io/) and its Android build dependencies.
-2.  Make sure your real `.env` (with your TMDB API key) exists in the project root — `buildozer.spec` bundles it into the app so it works on-device. This means your API key is embedded in the built APK; that's an accepted trade-off for personal/side-loaded use, not something you'd want for a public Play Store release (see `buildozer.spec` comments).
-3.  Build and install to a connected/adb-authorized phone:
+`.github/workflows/build-apk.yml` builds the APK for you, so you don't need a
+PC at all. It runs on every push to `main`, or on demand:
+
+1.  **Actions → Build Android APK → Run workflow.**
+2.  Wait. The first run takes roughly an hour — it downloads the Android
+    SDK/NDK and builds both CPU architectures. Later runs are cached and much
+    faster.
+3.  Download the `tmdb-movie-recommender-apk` artifact from the finished run,
+    unzip it, move the `.apk` to your phone and tap it. Android will ask you
+    to allow installing from unknown sources — expected for a sideloaded app.
+
+Optionally set a `TMDB_API_KEY` repository secret (**Settings → Secrets and
+variables → Actions**) and it is bundled as `.env`, overriding the key built
+into `main.py`.
+
+### Building locally instead
+
+Requires Linux or WSL; buildozer cannot run on Android itself.
+
+1.  Install [Buildozer](https://buildozer.readthedocs.io/) and its Android
+    build dependencies.
+2.  Optionally put your own `.env` in the project root — `buildozer.spec`
+    bundles it, and it takes priority over the built-in key. Either way the
+    key ends up inside the APK, which is fine for sideloading but not for a
+    public Play Store release.
+3.  Build and install to a connected, adb-authorized phone:
     ```bash
     buildozer -v android debug deploy run
     ```
-4.  The first build downloads the Android SDK/NDK and will take a while. Subsequent builds are much faster.
+
+### Notes on the build config
+
+-   `pillow` is in `requirements.txt` but deliberately **not** in
+    `buildozer.spec`. python-for-android has no pillow recipe, so it would be
+    resolved by pip under `--only-binary=:all:`, and pillow ships no
+    `py3-none-any` wheel — the build fails. Nothing imports PIL (Kivy uses its
+    SDL2 image provider on Android), so it isn't needed there.
+-   `certifi` **is** in `buildozer.spec`. Android has no system CA bundle that
+    Python's `ssl` can find, so without it every HTTPS call fails on-device.
+-   `android.accept_sdk_license = True` is required for unattended builds;
+    without it CI hangs on a licence prompt it can never answer.
 
 Before ever publishing to Google Play, bump `android.api` in `buildozer.spec` to whatever target level Play currently requires, add real `icon.png`/`presplash.png` assets, and write a privacy policy (the app sends network requests to TMDB but stores no personal data locally beyond your own watchlist).
 
