@@ -49,6 +49,30 @@ jobs:
           grep -rl 'AC_DEFUN(\[LT_SYS_SYMBOL_USCORE\]' /usr/share/aclocal/ \
             || { echo "::error::LT_SYS_SYMBOL_USCORE missing; the libffi recipe will fail"; exit 1; }
 
+      # Catches a p4a footgun in seconds instead of ~19 minutes into the build.
+      - name: Check pip requirements are not hyphenated
+        run: |
+          python3 - <<'PY'
+          import configparser, re, sys
+          cfg = configparser.ConfigParser()
+          cfg.read('buildozer.spec')
+          reqs = [r.strip() for r in cfg['app']['requirements'].split(',') if r.strip()]
+          # These are p4a recipes, not pip installs, so the rule does not apply.
+          recipes = {'python3', 'kivy', 'openssl', 'sdl2', 'sdl3', 'pyjnius',
+                     'android', 'sqlite3', 'png', 'freetype', 'libffi'}
+          bad = [r for r in reqs
+                 if re.split(r'[=<>!~]', r, 1)[0].strip().lower() not in recipes
+                 and '-' in re.split(r'[=<>!~]', r, 1)[0]]
+          if bad:
+              print(f"::error::Hyphenated pip requirement(s) in buildozer.spec: {bad}. "
+                    "python-for-android matches wheel names normalised to underscores "
+                    "against requirement names as written, so a hyphen makes it append "
+                    "the resolved wheel URL alongside your pin, and pip fails with "
+                    "ResolutionImpossible. Spell these with underscores.")
+              sys.exit(1)
+          print("requirements OK:", reqs)
+          PY
+
       # cython<3.2 is the ceiling python-for-android's pyjnius recipe
       # declares; its kivy and android recipes only require >=0.29.1.
       - name: Install buildozer

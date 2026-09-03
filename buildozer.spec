@@ -20,7 +20,14 @@ version = 1.0.0
 #    (Kivy uses its SDL2 image provider on Android), so it is not needed.
 #  - certifi is added. It is what ssl points at for HTTPS on Android, where
 #    there is no system CA bundle; see the certifi block in main.py.
-requirements = python3,kivy==2.3.1,requests,tmdbv3api==1.9.0,python-dotenv==1.2.2,certifi
+#  - python_dotenv is spelled with an UNDERSCORE, deliberately. Do not
+#    "correct" it to python-dotenv. python-for-android compares the wheel's
+#    metadata name normalised to underscores against the requirement names
+#    exactly as written here. A hyphen never matches, so p4a decides the
+#    package is unlisted and appends the resolved wheel URL *alongside* the
+#    pin - pip then sees both "python-dotenv==1.2.2" and "python-dotenv 1.2.3
+#    from <url>" and fails with ResolutionImpossible.
+requirements = python3,kivy==2.3.1,requests,tmdbv3api==1.9.0,python_dotenv==1.2.2,certifi
 
 # App needs network access to reach the TMDB API and poster CDN.
 android.permissions = INTERNET
