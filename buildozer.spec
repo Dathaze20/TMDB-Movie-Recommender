@@ -52,7 +52,18 @@ android.accept_sdk_license = True
 icon.filename = %(source.dir)s/assets/icon.png
 presplash.filename = %(source.dir)s/assets/presplash.png
 
-android.archs = arm64-v8a, armeabi-v7a
+# arm64-v8a covers every Android phone since roughly 2017, including the
+# Galaxy A16 this is built for. armeabi-v7a is the 32-bit ABI: it doubles
+# build time and doubles the surface for build failures (the first failed
+# CI run died specifically in the armeabi-v7a libffi build). Re-add it as
+# "arm64-v8a, armeabi-v7a" if you ever need to support a pre-2017 device.
+android.archs = arm64-v8a
+
+# Pin python-for-android to its latest tagged release. Buildozer otherwise
+# defaults to p4a.branch = master with p4a.commit = HEAD, i.e. whatever was
+# pushed upstream this morning - which is how three separate build failures
+# arrived here from code nobody released.
+p4a.branch = v2026.05.09
 
 [buildozer]
 log_level = 2

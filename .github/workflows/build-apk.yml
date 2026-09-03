@@ -11,8 +11,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    # buildozer.spec builds arm64-v8a and armeabi-v7a, and the first run also
-    # downloads the Android SDK/NDK, so allow plenty of headroom.
+    # The first run downloads the Android SDK/NDK, so allow plenty of headroom.
     timeout-minutes: 180
 
     steps:
@@ -85,15 +84,15 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.buildozer
-          key: buildozer-global-v2-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
-          restore-keys: buildozer-global-v2-${{ runner.os }}-
+          key: buildozer-global-v3-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
+          restore-keys: buildozer-global-v3-${{ runner.os }}-
 
       - name: Cache compiled recipes
         uses: actions/cache@v4
         with:
           path: .buildozer
-          key: buildozer-local-v2-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
-          restore-keys: buildozer-local-v2-${{ runner.os }}-
+          key: buildozer-local-v3-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
+          restore-keys: buildozer-local-v3-${{ runner.os }}-
 
       # buildozer.spec bundles .env via source.include_patterns, so setting a
       # TMDB_API_KEY repository secret overrides the key built into main.py.
