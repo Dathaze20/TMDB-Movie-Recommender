@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -162,4 +162,23 @@ jobs:
           name: tmdb-movie-recommender-apk
           path: bin/*.apk
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 90
+
+      # Artifacts expire, and they download as a .zip that has to be unpacked
+      # before Android will touch the .apk inside. A release asset never
+      # expires and downloads as the .apk itself, so the phone can install it
+      # straight from the browser. The "latest" tag is reused every build, so
+      # the link below is permanent:
+      #   https://github.com/Dathaze20/TMDB-Movie-Recommender/releases/latest
+      - name: Publish APK to a permanent release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          APK=$(ls bin/*.apk | head -1)
+          echo "Publishing $APK"
+          gh release view latest >/dev/null 2>&1 || gh release create latest \
+            --title "Latest APK" \
+            --notes "Debug APK built automatically from main. Download the .apk below and tap it on your phone."
+          gh release upload latest "$APK" --clobber
+          echo "Available at https://github.com/${GITHUB_REPOSITORY}/releases/latest"
