@@ -3,20 +3,19 @@ import json
 import time
 import socket
 import hashlib
-import traceback
 import logging
 import threading
 import urllib.request
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict
-from dotenv import load_dotenv
 
 from kivy.config import Config
 Config.set('kivy', 'keyboard_mode', 'system')
 
 from kivy.animation import Animation
 from kivy.app import App
+from kivy.base import ExceptionHandler, ExceptionManager
 from kivy.clock import Clock, mainthread
 from kivy.core.window import Window
 from kivy.graphics import Color, Rectangle, RoundedRectangle
@@ -35,7 +34,30 @@ from kivy.uix.textinput import TextInput
 from kivy.uix.widget import Widget
 from kivy.utils import platform
 from kivy import kivy_data_dir
-from tmdbv3api import TMDb, Movie
+
+import crash_reporter
+
+# Anything imported below can fail on a device in ways it never does on a
+# desktop - a wheel that did not make it into the APK, a C extension built for
+# the wrong ABI. An ImportError at module level kills the process before any
+# Kivy screen exists, so record it and carry on with a stub; build() shows it.
+IMPORT_ERROR = None
+try:
+    from dotenv import load_dotenv
+except Exception:
+    IMPORT_ERROR = crash_reporter.format_report(
+        __import__('sys').exc_info(), 'Failed to import python-dotenv'
+    )
+    def load_dotenv(*a, **k):
+        return False
+try:
+    from tmdbv3api import TMDb, Movie
+except Exception:
+    if IMPORT_ERROR is None:
+        IMPORT_ERROR = crash_reporter.format_report(
+            __import__('sys').exc_info(), 'Failed to import tmdbv3api'
+        )
+    TMDb = Movie = None
 
 from movie_utils import star_text, MovieDetails
 
@@ -110,8 +132,10 @@ if not os.getenv('TMDB_API_KEY'):
 # Module-level failures happen before build() runs, so the crash screen
 # cannot catch them - the app would just close. Record the traceback instead
 # and let build() display it.
-STARTUP_ERROR = None
+STARTUP_ERROR = IMPORT_ERROR
 try:
+    if TMDb is None:
+        raise RuntimeError('tmdbv3api is unavailable; see the import error above')
     tmdb = TMDb()
     tmdb.api_key = api_key or ''
     tmdb.wait_on_rate_limit = True
@@ -122,7 +146,9 @@ try:
     # old data.
     tmdb.cache = False
 except Exception:
-    STARTUP_ERROR = traceback.format_exc()
+    STARTUP_ERROR = crash_reporter.format_report(
+        __import__('sys').exc_info(), 'TMDB client setup failed'
+    )
     logging.error("TMDB client setup failed:\n%s", STARTUP_ERROR)
     tmdb = None
 
@@ -247,11 +273,22 @@ class PosterCache:
     def source(cls, poster_path, size='w185'):
         if not poster_path:
             return ''
-        local = cls._local_path(poster_path, size)
+        remote = f"https://image.tmdb.org/t/p/{size}/{poster_path}"
+        # This runs on the UI thread (MovieCard is built inside @mainthread
+        # _add_card), so an unwritable cache directory here would take the
+        # whole app down. Falling back to the network URL is always safe.
+        try:
+            local = cls._local_path(poster_path, size)
+        except Exception as e:
+            logging.warning("Poster cache unavailable, streaming instead: %s", e)
+            return remote
         if os.path.exists(local):
             return local
-        cls._pool.submit(cls._download, poster_path, size)
-        return f"https://image.tmdb.org/t/p/{size}/{poster_path}"
+        try:
+            cls._pool.submit(cls._download, poster_path, size)
+        except Exception as e:
+            logging.debug(f"Poster prefetch skip: {e}")
+        return remote
 
     @classmethod
     def _download(cls, poster_path, size):
@@ -538,7 +575,12 @@ class MoviePosterApp(App):
         you get a traceback in the terminal; on Android the app just closes
         the instant you open it, with no way to see why short of a USB cable
         and adb. So catch it and put the traceback on screen instead.
+
+        This only covers startup. Anything that goes wrong later - in a Clock
+        callback or a @mainthread hop out of a worker thread - happens after
+        build() has returned, so install_crash_handler() covers that.
         """
+        self.install_crash_handler()
         try:
             if STARTUP_ERROR:
                 raise RuntimeError(
@@ -546,17 +588,68 @@ class MoviePosterApp(App):
                 )
             return self._build_ui()
         except Exception:
-            report = traceback.format_exc()
+            report = crash_reporter.format_report(
+                __import__('sys').exc_info(), 'Startup failed'
+            )
             logging.error("Startup failed:\n%s", report)
-            try:
-                path = os.path.join(self.user_data_dir, 'crash.txt')
-                with open(path, 'w') as fh:
-                    fh.write(report)
-            except Exception:
-                path = '(could not be written)'
+            path = crash_reporter.write_crash(self._data_dir(), report)
             return self._crash_screen(report, path)
 
-    def _crash_screen(self, report, path):
+    def _data_dir(self):
+        """user_data_dir, or None if even that is unavailable."""
+        try:
+            return self.user_data_dir
+        except Exception:
+            return None
+
+    def install_crash_handler(self):
+        """Catch unhandled exceptions on the Kivy event loop.
+
+        The crash this app actually suffered came from a @mainthread callback:
+        a worker thread schedules the call, it runs later on the UI thread, and
+        the worker's try/except cannot reach it. Nothing caught it, so the
+        process died - which on a phone looks like the app opening, going dark
+        and closing.
+
+        Kivy routes every unhandled exception on its loop through
+        ExceptionManager first. Returning PASS keeps the app alive, so the
+        error can be written down and shown instead of taking the app with it.
+        """
+        if getattr(self, '_crash_handler', None) is not None:
+            return
+        app = self
+
+        class _Handler(ExceptionHandler):
+            def handle_exception(self, inst):
+                try:
+                    report = crash_reporter.format_report(
+                        __import__('sys').exc_info(), 'Unhandled error while running'
+                    )
+                    logging.error("Unhandled error:\n%s", report)
+                    path = crash_reporter.write_crash(app._data_dir(), report)
+                    app.report_runtime_crash(report, path)
+                except Exception:
+                    # A failure in here must not replace the original crash.
+                    logging.exception("Crash handler itself failed")
+                return ExceptionManager.PASS
+
+        self._crash_handler = _Handler()
+        ExceptionManager.add_handler(self._crash_handler)
+
+    @mainthread
+    def report_runtime_crash(self, report, path):
+        """Show a crash that happened after startup, without losing the app."""
+        if getattr(self, '_crash_shown', False):
+            return
+        self._crash_shown = True
+        try:
+            self.root_window.remove_widget(self.root)
+            self.root = self._crash_screen(report, path, after_start=True)
+            self.root_window.add_widget(self.root)
+        except Exception:
+            logging.exception("Could not show the crash screen")
+
+    def _crash_screen(self, report, path, after_start=False):
         root = BoxLayout(orientation='vertical', padding=dp(12), spacing=dp(8))
         with root.canvas.before:
             Color(*BG_COLOR)
@@ -566,19 +659,28 @@ class MoviePosterApp(App):
             size=lambda i, v: setattr(i._bg, 'size', v),
         )
         head = Label(
-            text='Startup failed', font_size='20sp', bold=True,
+            text='Startup failed' if not after_start else 'The app hit an error',
+            font_size='20sp', bold=True,
             color=ERROR_COLOR, size_hint_y=None, height=dp(34),
         )
         sub = Label(
-            text=f'Saved to {path}', font_size='11sp', color=TEXT_MUTED,
+            text=f'Saved to {path}' if path else 'Could not be saved to a file',
+            font_size='11sp', color=TEXT_MUTED,
             size_hint_y=None, height=dp(20),
         )
-        scroll = ScrollView(size_hint=(1, 1), do_scroll_x=True)
+        scroll = ScrollView(size_hint=(1, 1), do_scroll_x=False)
+        # text_size pins the wrap width. Without it Kivy rasterises the whole
+        # traceback into one enormous single-line texture, which silently
+        # fails to draw on mobile GPUs - a blank screen in place of the error.
         body = Label(
-            text=report, font_size='11sp', color=TEXT_PRIMARY,
-            size_hint=(None, None), halign='left', valign='top',
+            text=crash_reporter.clamp_report(report),
+            font_size='11sp', color=TEXT_PRIMARY,
+            size_hint=(1, None), halign='left', valign='top',
         )
-        body.bind(texture_size=body.setter('size'))
+        body.bind(
+            width=lambda i, w: setattr(i, 'text_size', (w, None)),
+            texture_size=lambda i, s: setattr(i, 'height', s[1]),
+        )
         scroll.add_widget(body)
         for w in (head, sub, scroll):
             root.add_widget(w)

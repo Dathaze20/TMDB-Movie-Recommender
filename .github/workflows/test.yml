@@ -21,7 +21,12 @@ jobs:
         run: pip install -r requirements-dev.txt
 
       - name: Check main.py compiles
-        run: python -m py_compile main.py movie_utils.py
+        run: python -m py_compile main.py movie_utils.py crash_reporter.py
+
+      # A package missing from buildozer.spec still builds a working APK - it
+      # only fails on the phone, as an ImportError at startup. Catch it here.
+      - name: Check every import is declared in buildozer.spec
+        run: python tools/check_requirements.py
 
       - name: Run tests
         run: pytest -v

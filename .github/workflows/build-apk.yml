@@ -114,6 +114,17 @@ jobs:
               sys.exit(1)
           PY
 
+      # A package missing from buildozer.spec builds a perfectly good APK that
+      # then dies on the phone with an ImportError at startup. Fail here, with
+      # the package named, rather than there with a black screen.
+      - name: Check every import is declared in buildozer.spec
+        run: python tools/check_requirements.py
+
+      - name: Run tests
+        run: |
+          python -m pip install pytest
+          python -m pytest -q
+
       # cython<3.2 is the ceiling python-for-android's pyjnius recipe
       # declares; its kivy and android recipes only require >=0.29.1.
       - name: Install buildozer
