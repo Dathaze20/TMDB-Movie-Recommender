@@ -3,6 +3,11 @@ name: Build Android APK
 on:
   push:
     branches: [main]
+  # Build the APK on pull requests too, so a change is proven to produce a
+  # working package before it reaches main. The release step below is skipped
+  # for these runs - only main publishes.
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -182,6 +187,7 @@ jobs:
       # the link below is permanent:
       #   https://github.com/Dathaze20/TMDB-Movie-Recommender/releases/latest
       - name: Publish APK to a permanent release
+        if: github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
