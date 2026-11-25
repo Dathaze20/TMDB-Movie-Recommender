@@ -47,7 +47,12 @@ This is a movie recommendation app built using Python and Kivy, leveraging the T
     ```bash
     pip install -r requirements.txt
     ```
-3.  **Set Up Environment Variables:**
+3.  **Set Up Your TMDB API Key:**
+
+    The app ships with **no key of its own**. On first launch it shows a setup
+    screen that walks you through getting one and stores it on the device.
+
+    For development you can skip that screen by supplying a key up front:
     *   Copy `.env.example` to `.env` in the project's root directory.
         ```bash
         cp .env.example .env
@@ -56,6 +61,10 @@ This is a movie recommendation app built using Python and Kivy, leveraging the T
         ```env
         TMDB_API_KEY=YOUR_TMDB_API_KEY
         ```
+
+    Resolution order is: the `TMDB_API_KEY` environment variable, then `.env`,
+    then whatever key you saved in the app. `.env` is gitignored and must
+    never be committed.
 4.  **Run the App:**
     ```bash
     python main.py
@@ -77,8 +86,8 @@ PC at all. It runs on every push to `main`, or on demand:
     to allow installing from unknown sources — expected for a sideloaded app.
 
 Optionally set a `TMDB_API_KEY` repository secret (**Settings → Secrets and
-variables → Actions**) and it is bundled as `.env`, overriding the key built
-into `main.py`.
+variables → Actions**) and it is bundled as `.env`, so the APK starts already
+configured. Without it the app opens its setup screen and asks for a key.
 
 ### Building locally instead
 
@@ -87,9 +96,10 @@ Requires Linux or WSL; buildozer cannot run on Android itself.
 1.  Install [Buildozer](https://buildozer.readthedocs.io/) and its Android
     build dependencies.
 2.  Optionally put your own `.env` in the project root — `buildozer.spec`
-    bundles it, and it takes priority over the built-in key. Either way the
-    key ends up inside the APK, which is fine for sideloading but not for a
-    public Play Store release.
+    bundles it, so the APK starts configured. Note this puts the key inside
+    the APK, which is fine for your own sideloaded build but not for anything
+    you share. Leave it out and the app asks for a key on first launch
+    instead, storing it on the device only.
 3.  Build and install to a connected, adb-authorized phone:
     ```bash
     buildozer -v android debug deploy run
