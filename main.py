@@ -6,6 +6,7 @@ import hashlib
 import logging
 import threading
 import urllib.request
+import urllib.error
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict
@@ -43,22 +44,14 @@ import crash_reporter
 # Kivy screen exists, so record it and carry on with a stub; build() shows it.
 IMPORT_ERROR = None
 try:
-    from dotenv import load_dotenv
-except Exception:
-    IMPORT_ERROR = crash_reporter.format_report(
-        __import__('sys').exc_info(), 'Failed to import python-dotenv'
-    )
-    def load_dotenv(*a, **k):
-        return False
-try:
     from tmdbv3api import TMDb, Movie
 except Exception:
-    if IMPORT_ERROR is None:
-        IMPORT_ERROR = crash_reporter.format_report(
-            __import__('sys').exc_info(), 'Failed to import tmdbv3api'
-        )
+    IMPORT_ERROR = crash_reporter.format_report(
+        __import__('sys').exc_info(), 'Failed to import tmdbv3api'
+    )
     TMDb = Movie = None
 
+import config
 from movie_utils import star_text, MovieDetails
 
 # Kivy's default font (Roboto) has no glyphs for ★ ☆ ✕ ← ▶, so those render
@@ -95,39 +88,20 @@ try:
 except Exception as e:
     logging.debug(f"certifi unavailable, relying on system CA store: {e}")
 
-def _find_env_file():
-    """Look for .env next to the script, in the current working directory,
-    and one level up - covers the common ways an Android runner (Pydroid,
-    Termux) can end up launching main.py from an unexpected working
-    directory or a nested folder from a zip download."""
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    candidates = []
-    for d in (script_dir, os.getcwd(), os.path.dirname(script_dir)):
-        path = os.path.join(d, '.env')
-        if path not in candidates:
-            candidates.append(path)
-    for path in candidates:
-        if os.path.exists(path):
-            return path, candidates
-    return None, candidates
-
-
 _script_dir = os.path.dirname(os.path.abspath(__file__))
-_env_path, _env_candidates = _find_env_file()
-load_dotenv(_env_path) if _env_path else load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s:%(levelname)s:%(message)s')
 
-# Original fallback key this project shipped with from its very first commit -
-# used only if no TMDB_API_KEY is found via .env/environment, so the app
-# works out of the box regardless of where .env ends up on a given device.
-# A .env with your own key always takes priority over this.
-_DEFAULT_API_KEY = '412cb4afbe96d39f9db34601104ff7e4'
+# tmdbv3api's api_key setter writes straight into os.environ['TMDB_API_KEY'].
+# Assigning it - with '' above all - therefore overwrites, or erases, a key the
+# user exported into their shell. Snapshot the real environment once here,
+# before anything can clobber it, and resolve against that.
+ENV_AT_START = dict(os.environ)
 
-api_key = os.getenv('TMDB_API_KEY') or _DEFAULT_API_KEY
-if not os.getenv('TMDB_API_KEY'):
-    _checked = ', '.join(_env_candidates)
-    logging.warning(f"TMDB_API_KEY not found (checked for .env at: {_checked}); using built-in default key.")
+# The key is resolved per-run in build(), once App.user_data_dir is known, so
+# a key the user saves on the device can be picked up without a restart.
+# There is deliberately no fallback key compiled in - see config.py.
+api_key = None
 
 # Module-level failures happen before build() runs, so the crash screen
 # cannot catch them - the app would just close. Record the traceback instead
@@ -137,7 +111,7 @@ try:
     if TMDb is None:
         raise RuntimeError('tmdbv3api is unavailable; see the import error above')
     tmdb = TMDb()
-    tmdb.api_key = api_key or ''
+    # Deliberately not assigning api_key here: see ENV_AT_START above.
     tmdb.wait_on_rate_limit = True
     # tmdbv3api caches identical GET requests indefinitely (unbounded
     # lru_cache) on its own, independent of our _category_cache TTL/refresh
@@ -567,6 +541,13 @@ class MoviePosterApp(App):
         self._category_cache = {}
         self._detail_token = 0
         self._detail_body = None
+        self.setup_scr = None
+        self.key_source = None
+        self.key_input = None
+        self.setup_status = None
+        self.setup_secondary = None
+        self.save_key_btn = None
+        self._key_busy = False
 
     def build(self):
         """Build the UI, but never die silently.
@@ -729,9 +710,16 @@ class MoviePosterApp(App):
             color=TEXT_PRIMARY, font_size='16sp', bold=True, italic=True,
         )
         about_btn.bind(on_release=self._show_about)
+        key_btn = Button(
+            text='Key', size_hint=(None, None), size=(dp(42), dp(34)),
+            background_normal='', background_color=TAB_INACTIVE,
+            color=TEXT_PRIMARY, font_size='12sp',
+        )
+        key_btn.bind(on_release=self.show_setup)
         title_bar.add_widget(self.title_label)
         title_bar.add_widget(refresh_btn)
         title_bar.add_widget(about_btn)
+        title_bar.add_widget(key_btn)
         root.add_widget(title_bar)
 
         self.search_bar = SearchBar()
@@ -774,16 +762,262 @@ class MoviePosterApp(App):
         self.main_scr.add_widget(root)
         sm.add_widget(self.main_scr)
         sm.add_widget(self.detail_scr)
+        self.setup_scr = Screen(name='Setup')
+        sm.add_widget(self.setup_scr)
 
-        if not api_key:
-            checked = ' OR '.join(_env_candidates)
-            self._show_error(f"TMDB_API_KEY missing. Checked for a .env file at: {checked}")
+        # No key means no browsing, and - importantly - no requests. The old
+        # build launched straight into the grid and fired a round of doomed
+        # calls whenever the key was missing.
+        if not self._apply_resolved_key():
+            self.show_setup()
             return sm
 
         self._show_skeletons()
         gen = self.load_generation
         threading.Thread(target=self._load_cat, args=('Popular', gen), daemon=True).start()
         return sm
+
+    # -- API key ---------------------------------------------------------------
+
+    def _apply_resolved_key(self):
+        """Resolve a key and hand it to tmdbv3api. True if one was found."""
+        global api_key
+        resolved = config.resolve_api_key(
+            data_dir=self._data_dir(),
+            env=ENV_AT_START,
+            dotenv_path=os.path.join(_script_dir, '.env'),
+        )
+        self.key_source = resolved.source
+        api_key = resolved.key
+        # Only assign when there is something to assign: the setter writes to
+        # os.environ, so passing '' would erase an exported key.
+        if tmdb is not None and resolved.key:
+            tmdb.api_key = resolved.key
+        return bool(resolved)
+
+    def show_setup(self, *_a):
+        """Open the key setup screen, building it on first use."""
+        if not self.setup_scr.children:
+            self.setup_scr.add_widget(self._build_setup())
+        self._refresh_setup_state()
+        self.sm.transition.direction = 'left'
+        self.sm.current = 'Setup'
+
+    def _build_setup(self):
+        root = BoxLayout(orientation='vertical')
+        with root.canvas.before:
+            Color(*BG_COLOR)
+            root._bg = Rectangle(pos=root.pos, size=root.size)
+        root.bind(
+            pos=lambda i, v: setattr(i._bg, 'pos', v),
+            size=lambda i, v: setattr(i._bg, 'size', v),
+        )
+
+        scroll = ScrollView(do_scroll_x=False)
+        body = BoxLayout(
+            orientation='vertical', size_hint_y=None,
+            padding=[dp(18), dp(24)], spacing=dp(10),
+        )
+        body.bind(minimum_height=body.setter('height'))
+
+        body.add_widget(self._label(
+            'Set up your TMDB key', '22sp', TEXT_PRIMARY,
+            bold=True, height=dp(38),
+        ))
+        body.add_widget(self._wrap_label(
+            'This app reads film data from TMDB. You need your own free API '
+            'key to use it.', TEXT_MUTED,
+        ))
+        body.add_widget(Widget(size_hint_y=None, height=dp(6)))
+        body.add_widget(self._wrap_label(
+            '1.  Open themoviedb.org and sign up (free).\n'
+            '2.  Go to Settings, then API.\n'
+            '3.  Request an API key and copy the v3 auth key.\n'
+            '4.  Paste it below and tap Save.',
+            TEXT_PRIMARY,
+        ))
+
+        open_btn = Button(
+            text='Open themoviedb.org', size_hint_y=None, height=dp(44),
+            background_normal='', background_color=TAB_INACTIVE,
+            color=TEXT_PRIMARY, font_size='14sp',
+        )
+        open_btn.bind(on_release=lambda *_a: open_external_url(config.TMDB_SIGNUP_URL))
+        body.add_widget(open_btn)
+
+        body.add_widget(Widget(size_hint_y=None, height=dp(6)))
+        field = BoxLayout(size_hint_y=None, height=dp(48), padding=[dp(4), dp(2)])
+        with field.canvas.before:
+            Color(*SEARCH_BG)
+            field._bg = RoundedRectangle(
+                pos=field.pos, size=field.size, radius=[dp(12)]
+            )
+        field.bind(
+            pos=lambda i, v: setattr(i._bg, 'pos', v),
+            size=lambda i, v: setattr(i._bg, 'size', v),
+        )
+        self.key_input = TextInput(
+            hint_text='32-character key', multiline=False, write_tab=False,
+            background_color=(0, 0, 0, 0), background_normal='', background_active='',
+            foreground_color=TEXT_PRIMARY, hint_text_color=TEXT_MUTED,
+            cursor_color=ACCENT, font_size='15sp', padding=[dp(12), dp(13)],
+        )
+        self.key_input.bind(on_text_validate=lambda *_a: self._submit_key())
+        self.key_input.bind(text=lambda *_a: self._set_setup_status(''))
+        field.add_widget(self.key_input)
+        body.add_widget(field)
+
+        self.setup_status = self._wrap_label('', ERROR_COLOR, font_size='13sp')
+        body.add_widget(self.setup_status)
+
+        self.save_key_btn = Button(
+            text='Save and continue', size_hint_y=None, height=dp(48),
+            background_normal='', background_color=ACCENT,
+            color=TEXT_PRIMARY, font_size='15sp', bold=True,
+        )
+        self.save_key_btn.bind(on_release=lambda *_a: self._submit_key())
+        body.add_widget(self.save_key_btn)
+
+        self.setup_secondary = BoxLayout(
+            size_hint_y=None, height=0, spacing=dp(8),
+        )
+        body.add_widget(self.setup_secondary)
+
+        body.add_widget(Widget(size_hint_y=None, height=dp(6)))
+        body.add_widget(self._wrap_label(
+            'Your key is stored only on this device and is never shared. You '
+            'can change or remove it later from the key button in the header.',
+            TEXT_MUTED, font_size='12sp',
+        ))
+
+        scroll.add_widget(body)
+        root.add_widget(scroll)
+        return root
+
+    def _refresh_setup_state(self):
+        """Switch between first-run setup and managing an existing key."""
+        self.setup_secondary.clear_widgets()
+        self._set_setup_status('')
+        self.key_input.text = ''
+        store = config.ApiKeyStore(self._data_dir() or _script_dir)
+        has_saved = bool(store.read())
+
+        if self.key_source and self.key_source != config.SOURCE_SAVED:
+            self._set_setup_status(
+                f'A key is currently supplied by the {self.key_source}. Saving '
+                'one here will be ignored until that is removed.', TEXT_MUTED,
+            )
+
+        if has_saved:
+            remove = Button(
+                text='Remove saved key', background_normal='',
+                background_color=TAB_INACTIVE, color=ERROR_COLOR, font_size='14sp',
+            )
+            remove.bind(on_release=lambda *_a: self._remove_key())
+            self.setup_secondary.add_widget(remove)
+        if api_key:
+            cancel = Button(
+                text='Cancel', background_normal='',
+                background_color=TAB_INACTIVE, color=TEXT_MUTED, font_size='14sp',
+            )
+            cancel.bind(on_release=lambda *_a: self._leave_setup())
+            self.setup_secondary.add_widget(cancel)
+        self.setup_secondary.height = dp(44) if self.setup_secondary.children else 0
+
+    def _set_setup_status(self, message, color=None):
+        if getattr(self, 'setup_status', None) is None:
+            return
+        if getattr(self, '_key_busy', False) and not message:
+            return
+        self.setup_status.color = color or ERROR_COLOR
+        self.setup_status.text = message
+
+    def _submit_key(self):
+        if getattr(self, '_key_busy', False):
+            return
+        candidate = self.key_input.text.strip()
+        if not candidate:
+            self._set_setup_status('Paste your TMDB API key first.')
+            return
+        if not config.looks_like_api_key(candidate):
+            self._set_setup_status(
+                "That doesn't look like a TMDB v3 key - they are 32 characters "
+                'of letters a-f and digits. Check for a stray space.'
+            )
+            return
+        self._set_key_busy(True)
+        self._set_setup_status('Checking your key with TMDB...', TEXT_MUTED)
+        threading.Thread(
+            target=self._validate_key, args=(candidate,), daemon=True
+        ).start()
+
+    def _validate_key(self, candidate):
+        """Confirm the key works before storing it. Runs off the UI thread."""
+        try:
+            resp = urllib.request.urlopen(
+                'https://api.themoviedb.org/3/configuration?api_key=' + candidate,
+                timeout=15,
+            )
+            ok = resp.status == 200
+            message = '' if ok else f'TMDB replied {resp.status}.'
+        except urllib.error.HTTPError as exc:
+            ok = False
+            message = ('TMDB rejected that key.' if exc.code in (401, 403)
+                       else f'TMDB replied {exc.code}.')
+        except Exception as exc:
+            ok = False
+            message = f'Could not reach TMDB: {exc}'
+        self._finish_key_check(candidate, ok, message)
+
+    @mainthread
+    def _finish_key_check(self, candidate, ok, message):
+        self._set_key_busy(False)
+        if not ok:
+            self._set_setup_status(message)
+            return
+        try:
+            config.ApiKeyStore(self._data_dir() or _script_dir).write(candidate)
+        except Exception as exc:
+            self._set_setup_status(f'Could not save the key: {exc}')
+            return
+        self._set_setup_status('Key accepted.', (0.30, 0.69, 0.31, 1))
+        self._apply_resolved_key()
+        self._leave_setup(reload=True)
+
+    def _set_key_busy(self, busy):
+        self._key_busy = busy
+        self.save_key_btn.disabled = busy
+        self.save_key_btn.text = 'Checking...' if busy else 'Save and continue'
+
+    def _remove_key(self):
+        config.ApiKeyStore(self._data_dir() or _script_dir).clear()
+        self._apply_resolved_key()
+        self._refresh_setup_state()
+        self._set_setup_status('Saved key removed.', TEXT_MUTED)
+
+    def _leave_setup(self, reload=False):
+        self.sm.transition.direction = 'right'
+        self.sm.current = 'Main'
+        if reload:
+            self._clear_error()
+            self._clear_grid()
+            self._show_skeletons()
+            self.load_generation += 1
+            gen = self.load_generation
+            threading.Thread(
+                target=self._load_cat, args=(self.current_cat, gen), daemon=True
+            ).start()
+
+    def _wrap_label(self, text, color, font_size='14sp'):
+        lbl = Label(
+            text=text, font_size=font_size, color=color,
+            size_hint_y=None, halign='left', valign='top',
+        )
+        lbl.bind(
+            width=lambda i, w: setattr(i, 'text_size', (w, None)),
+            texture_size=lambda i, s: setattr(i, 'height', s[1]),
+        )
+        return lbl
 
     # -- favorites / watchlist -------------------------------------------------
 
