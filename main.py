@@ -37,6 +37,7 @@ from kivy.utils import platform
 from kivy import kivy_data_dir
 
 import crash_reporter
+import nettls
 
 # Anything imported below can fail on a device in ways it never does on a
 # desktop - a wheel that did not make it into the APK, a C extension built for
@@ -77,20 +78,24 @@ else:
 # (and the loading popup) forever.
 socket.setdefaulttimeout(15)
 
-# Android ships no system CA bundle that Python's ssl module can find, so
-# every HTTPS call - the TMDB API and the poster CDN alike - fails on a
-# packaged APK unless ssl is pointed at the certifi bundle bundled with it.
-# setdefault means a real system bundle (desktop, Pydroid) still wins.
-try:
-    import certifi
-    os.environ.setdefault('SSL_CERT_FILE', certifi.where())
-    os.environ.setdefault('REQUESTS_CA_BUNDLE', certifi.where())
-except Exception as e:
-    logging.debug(f"certifi unavailable, relying on system CA store: {e}")
-
 _script_dir = os.path.dirname(os.path.abspath(__file__))
 
+# Configure logging before anything that might want to report a problem.
+# The previous build set up TLS first and logged its one diagnostic at DEBUG
+# level into an unconfigured logger, so when it failed on the device there was
+# nothing to read anywhere.
 logging.basicConfig(level=logging.INFO, format='%(asctime)s:%(levelname)s:%(message)s')
+
+# Android ships no CA bundle that Python's ssl module can find, so every HTTPS
+# call - the TMDB API and the poster CDN alike - fails on a packaged APK with
+# CERTIFICATE_VERIFY_FAILED until one is supplied. See nettls.py; TLS_SETUP
+# records what was found so the setup screen can show it if a call still fails.
+#
+# force on Android rather than only when the default store looks empty: posters
+# are loaded by Kivy's AsyncImage, which makes its own urlopen call, so if the
+# device ever reported a store that exists but cannot verify anything, every
+# poster would silently fail to load while the API calls worked.
+TLS_SETUP = nettls.configure(force=(platform == 'android'))
 
 # tmdbv3api's api_key setter writes straight into os.environ['TMDB_API_KEY'].
 # Assigning it - with '' above all - therefore overwrites, or erases, a key the
@@ -272,7 +277,9 @@ class PosterCache:
         try:
             url = f"https://image.tmdb.org/t/p/{size}/{poster_path}"
             req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=15) as resp:
+            with urllib.request.urlopen(
+                req, timeout=15, context=nettls.context()
+            ) as resp:
                 data = resp.read()
             tmp = local + '.tmp'
             with open(tmp, 'wb') as f:
@@ -957,6 +964,7 @@ class MoviePosterApp(App):
             resp = urllib.request.urlopen(
                 'https://api.themoviedb.org/3/configuration?api_key=' + candidate,
                 timeout=15,
+                context=nettls.context(),
             )
             ok = resp.status == 200
             message = '' if ok else f'TMDB replied {resp.status}.'
@@ -966,7 +974,13 @@ class MoviePosterApp(App):
                        else f'TMDB replied {exc.code}.')
         except Exception as exc:
             ok = False
-            message = f'Could not reach TMDB: {exc}'
+            # A certificate failure is a packaging problem, not a bad key, and
+            # the user cannot act on it without knowing what the app found.
+            if nettls.looks_like_certificate_error(exc):
+                message = (f'Could not verify TMDB\'s certificate.\n\n'
+                           f'{TLS_SETUP.describe()}\n\n{exc}')
+            else:
+                message = f'Could not reach TMDB: {exc}'
         self._finish_key_check(candidate, ok, message)
 
     @mainthread
