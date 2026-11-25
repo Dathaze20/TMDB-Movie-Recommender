@@ -153,8 +153,9 @@ jobs:
           restore-keys: buildozer-local-v4-${{ runner.os }}-
 
       # buildozer.spec bundles .env via source.include_patterns, so setting a
-      # TMDB_API_KEY repository secret overrides the key built into main.py.
-      # Without the secret the app falls back to its built-in key as usual.
+      # TMDB_API_KEY repository secret ships the APK pre-configured. There is
+      # no key compiled into the source any more, so without the secret the
+      # app asks for one on its setup screen and stores it on the device.
       - name: Write .env from secret
         env:
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
@@ -163,7 +164,7 @@ jobs:
             printf 'TMDB_API_KEY=%s\n' "$TMDB_API_KEY" > .env
             echo "TMDB_API_KEY secret found - bundling it into the APK."
           else
-            echo "No TMDB_API_KEY secret - the app will use its built-in key."
+            echo "No TMDB_API_KEY secret - the app will ask for a key on first launch."
           fi
 
       - name: Build debug APK

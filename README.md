@@ -113,7 +113,12 @@ Requires Linux or WSL; buildozer cannot run on Android itself.
     `py3-none-any` wheel — the build fails. Nothing imports PIL (Kivy uses its
     SDL2 image provider on Android), so it isn't needed there.
 -   `certifi` **is** in `buildozer.spec`. Android has no system CA bundle that
-    Python's `ssl` can find, so without it every HTTPS call fails on-device.
+    Python's `ssl` can find, so without it every HTTPS call fails on-device
+    with `CERTIFICATE_VERIFY_FAILED`. Shipping `certifi` is necessary but not
+    sufficient: `nettls.py` has to install it as the process default, because
+    `urlopen` caches one opener whose `HTTPSHandler` captures its SSL context
+    at construction. Setting `SSL_CERT_FILE` alone does not reach it, which is
+    exactly how the first release failed on a phone while passing CI.
 -   `android.accept_sdk_license = True` is required for unattended builds;
     without it CI hangs on a licence prompt it can never answer.
 
