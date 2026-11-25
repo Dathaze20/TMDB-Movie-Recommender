@@ -3,6 +3,11 @@ name: Build Android APK
 on:
   push:
     branches: [main]
+  # Build the APK on pull requests too, so a change is proven to produce a
+  # working package before it reaches main. The release step below is skipped
+  # for these runs - only main publishes.
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -114,6 +119,17 @@ jobs:
               sys.exit(1)
           PY
 
+      # A package missing from buildozer.spec builds a perfectly good APK that
+      # then dies on the phone with an ImportError at startup. Fail here, with
+      # the package named, rather than there with a black screen.
+      - name: Check every import is declared in buildozer.spec
+        run: python tools/check_requirements.py
+
+      - name: Run tests
+        run: |
+          python -m pip install pytest
+          python -m pytest -q
+
       # cython<3.2 is the ceiling python-for-android's pyjnius recipe
       # declares; its kivy and android recipes only require >=0.29.1.
       - name: Install buildozer
@@ -171,6 +187,7 @@ jobs:
       # the link below is permanent:
       #   https://github.com/Dathaze20/TMDB-Movie-Recommender/releases/latest
       - name: Publish APK to a permanent release
+        if: github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
