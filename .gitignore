@@ -9,4 +9,10 @@ __pycache__/
 bin/
 *.apk
 *.aab
+
+# Signing material never belongs in the repository. The debug keystore lives
+# in the ANDROID_DEBUG_KEYSTORE_B64 repository secret; see README.
 *.keystore
+*.jks
+*.p12
+keystore.base64*
