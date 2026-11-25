@@ -167,11 +167,67 @@ jobs:
             echo "No TMDB_API_KEY secret - the app will ask for a key on first launch."
           fi
 
+      # Every CI runner generates its own throwaway debug keystore, so each
+      # build was signed with a different key. Android refuses to install an
+      # APK over one signed by a different key, so every update meant
+      # uninstalling the app first and losing the local watchlist. Restoring a
+      # fixed keystore makes the signature stable for good.
+      #
+      # The Gradle build resolves the debug keystore from ANDROID_PREFS_ROOT,
+      # falling back to the home directory. buildozer 1.6.0 sets neither that
+      # nor ANDROID_SDK_HOME, so ~/.android/debug.keystore is what it uses;
+      # ANDROID_PREFS_ROOT is still set below so a future version cannot
+      # quietly redirect it somewhere else.
+      #
+      # This keystore is a debug key and nothing more. It carries no trust,
+      # cannot publish to Play, and exists only so successive builds keep the
+      # same identity. It is still kept in a secret rather than committed, so
+      # the repository holds no credential-shaped file.
+      - name: Restore the signing keystore
+        env:
+          ANDROID_DEBUG_KEYSTORE_B64: ${{ secrets.ANDROID_DEBUG_KEYSTORE_B64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ANDROID_DEBUG_KEYSTORE_B64:-}" ]; then
+            echo "::error::The ANDROID_DEBUG_KEYSTORE_B64 repository secret is not set."
+            echo "Without it this build would sign the APK with a throwaway key,"
+            echo "and the result would not install over the previous release."
+            echo "Add it under Settings > Secrets and variables > Actions >"
+            echo "New repository secret, then re-run this workflow."
+            exit 1
+          fi
+          mkdir -p ~/.android
+          printf '%s' "$ANDROID_DEBUG_KEYSTORE_B64" | base64 -d > ~/.android/debug.keystore
+          if ! keytool -list -keystore ~/.android/debug.keystore \
+               -storepass android -alias androiddebugkey >/dev/null 2>&1; then
+            echo "::error::The restored keystore could not be read."
+            echo "It must be a JKS keystore with alias 'androiddebugkey' and"
+            echo "store/key password 'android', base64-encoded."
+            exit 1
+          fi
+          # Recorded so the fingerprint can be compared across builds at a glance.
+          keytool -list -v -keystore ~/.android/debug.keystore \
+            -storepass android -alias androiddebugkey | grep 'SHA256:'
+          keytool -list -v -keystore ~/.android/debug.keystore \
+            -storepass android -alias androiddebugkey \
+            | grep 'SHA256:' | awk '{print $2}' > "$RUNNER_TEMP/expected-fingerprint.txt"
+
       - name: Build debug APK
-        run: buildozer -v android debug
+        run: |
+          export ANDROID_PREFS_ROOT="$HOME"
+          buildozer -v android debug
 
       - name: Show artifacts
         run: ls -lh bin/
+
+      # A green build that silently fell back to a different key would produce
+      # an APK that cannot be installed over the last one - the exact failure
+      # this change exists to prevent. Check it rather than assume it.
+      - name: Verify the APK is signed with the expected key
+        run: |
+          set -euo pipefail
+          APK=$(ls bin/*.apk | head -1)
+          python tools/apk_signature.py "$APK" --expect "$(cat "$RUNNER_TEMP/expected-fingerprint.txt")"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
@@ -187,6 +243,13 @@ jobs:
       # straight from the browser. The "latest" tag is reused every build, so
       # the link below is permanent:
       #   https://github.com/Dathaze20/TMDB-Movie-Recommender/releases/latest
+      #
+      # The release is recreated rather than having its asset replaced in
+      # place. Uploading over an existing release leaves its original publish
+      # date untouched, so the page kept showing the date the tag was first
+      # cut - "1mo ago" on top of an APK built minutes earlier, with no way
+      # for a reader to tell which file was actually there. Recreating it
+      # costs a second and makes the date mean what it says.
       - name: Publish APK to a permanent release
         if: github.event_name != 'pull_request'
         env:
@@ -194,9 +257,25 @@ jobs:
         run: |
           set -euo pipefail
           APK=$(ls bin/*.apk | head -1)
+          BUILT_AT=$(date -u '+%Y-%m-%d %H:%M UTC')
+          FINGERPRINT=$(cat "$RUNNER_TEMP/expected-fingerprint.txt")
           echo "Publishing $APK"
-          gh release view latest >/dev/null 2>&1 || gh release create latest \
+
+          gh release delete latest --yes --cleanup-tag || true
+
+          gh release create latest "$APK" \
+            --target "$GITHUB_SHA" \
             --title "Latest APK" \
-            --notes "Debug APK built automatically from main. Download the .apk below and tap it on your phone."
-          gh release upload latest "$APK" --clobber
+            --notes "$(cat <<EOF
+          Debug APK built automatically from \`main\`. Download the \`.apk\` below and tap it on your phone.
+
+          | | |
+          |---|---|
+          | Built | $BUILT_AT |
+          | Commit | \`$GITHUB_SHA\` |
+          | Signing key (SHA-256) | \`$FINGERPRINT\` |
+
+          The signing key is the same for every build, so this installs over the previous version without uninstalling first.
+          EOF
+          )"
           echo "Available at https://github.com/${GITHUB_REPOSITORY}/releases/latest"

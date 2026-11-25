@@ -122,6 +122,43 @@ Requires Linux or WSL; buildozer cannot run on Android itself.
 -   `android.accept_sdk_license = True` is required for unattended builds;
     without it CI hangs on a licence prompt it can never answer.
 
+### Signing
+
+Android refuses to install an APK over one signed by a different key. Every CI
+runner generates its own throwaway debug keystore, so for the first few
+releases each build had a different signature and every update meant
+uninstalling the app first — losing the local watchlist.
+
+The workflow now restores a fixed keystore from the
+`ANDROID_DEBUG_KEYSTORE_B64` repository secret (**Settings → Secrets and
+variables → Actions**), base64-encoded, with alias `androiddebugkey` and
+store/key password `android` — the standard Android debug credentials, which
+is what the Gradle debug signing config expects.
+
+To generate one:
+
+```bash
+keytool -genkeypair -v -keystore debug.keystore \
+  -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10950 \
+  -storepass android -keypass android \
+  -dname "CN=Android Debug, O=Android, C=US"
+base64 -w 0 debug.keystore      # paste this into the secret
+```
+
+Notes:
+
+-   **The build fails if the secret is missing**, rather than falling back to a
+    random key and producing an APK that will not install over the last one.
+-   After building, `tools/apk_signature.py` reads the signer certificate back
+    out of the APK and compares its SHA-256 to the keystore's. A silent
+    fallback would otherwise pass CI and only fail on a phone.
+-   This is a **debug** key. It carries no trust, cannot publish to Google
+    Play, and exists only to keep successive builds installable over each
+    other. Publishing to Play needs a real upload key, kept somewhere safer.
+-   It still lives in a secret rather than the repo, so the repository holds no
+    credential-shaped file. `*.keystore`, `*.jks` and `*.p12` are gitignored
+    and a test asserts none is ever tracked.
+
 Before ever publishing to Google Play, bump `android.api` in `buildozer.spec` to whatever target level Play currently requires, add real `icon.png`/`presplash.png` assets, and write a privacy policy (the app sends network requests to TMDB but stores no personal data locally beyond your own watchlist).
 
 ## Tests
